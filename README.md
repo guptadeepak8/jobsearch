@@ -106,12 +106,12 @@ For dedicated hardware (e.g. Dell Latitude 3340, Intel i5, 4 GB RAM, HDD):
 ## Milestone Progress
 
 - [x] **Milestone 1**: Project structure, Browser Manager, Persistent Chromium context, URL navigation, Lifecycle management, Test suite.
-- [ ] **Milestone 2**: Fastify API Server, Browser control endpoints, WebSocket real-time updates.
-- [ ] **Milestone 3**: Remote browser monitoring, Human takeover controller, Pause/Resume mechanisms.
-- [ ] **Milestone 4**: Generic form detection, Accessible DOM inspection, Structured field extraction.
-- [ ] **Milestone 5**: Profile management, SQLite answer memory with `better-sqlite3`.
-- [ ] **Milestone 6**: Form filling engine, Validation checks, Resume upload handler.
-- [ ] **Milestone 7**: Web dashboard integration, Application review & approval guard, Application history.
+- [x] **Milestone 2**: Fastify API Server, Browser control endpoints, WebSocket real-time updates.
+- [x] **Milestone 3**: Remote browser monitoring, Human takeover controller, Pause/Resume mechanisms.
+- [x] **Milestone 4**: Generic form detection, Accessible DOM inspection, Structured field extraction.
+- [x] **Milestone 5**: Profile management, SQLite answer memory with `better-sqlite3` / `node:sqlite`.
+- [x] **Milestone 6**: Form filling engine, Validation checks, Resume upload handler.
+- [x] **Milestone 7**: Web dashboard integration, Application review & approval guard, Application history.
 
 ---
 

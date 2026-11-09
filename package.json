@@ -5,10 +5,20 @@
   "description": "Locally operated, resource-efficient automated job application assistant",
   "packageManager": "pnpm@10.15.0",
   "scripts": {
-    "build": "pnpm --filter ./packages/* run build",
-    "test": "pnpm --filter ./packages/* run test",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm --filter @jobsearch/server run test",
     "dev:server": "pnpm --filter @jobsearch/server run dev",
-    "dev:dashboard": "pnpm --filter @jobsearch/dashboard run dev"
+    "dev:dashboard": "pnpm --filter @jobsearch/dashboard run dev",
+    "start": "pnpm --filter @jobsearch/server run start"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
+    "ignoredBuiltDependencies": [
+      "better-sqlite3"
+    ]
   },
   "keywords": [
     "job-automation",
