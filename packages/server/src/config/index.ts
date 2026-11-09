@@ -13,6 +13,7 @@ export const ConfigSchema = z.object({
   BROWSER_SLOW_MO: z.coerce.number().default(0),
   BROWSER_NAVIGATION_TIMEOUT: z.coerce.number().default(30000),
   DISPLAY: z.string().optional(),
+  DATABASE_PATH: z.string().default('./data/jobsearch.db'),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -21,16 +22,24 @@ export type Config = z.infer<typeof ConfigSchema>;
  * Loads and validates environment variables.
  * Resolves paths relative to project root or provided base directory.
  */
-export function loadConfig(env: Record<string, string | undefined> = process.env, baseDir = process.cwd()) {
+export function loadConfig(
+  env: Record<string, string | undefined> = process.env,
+  baseDir = process.cwd()
+) {
   const parsed = ConfigSchema.parse(env);
-  
-  // Resolve absolute path for user data directory cross-platform
+
+  // Resolve absolute paths cross-platform
   const resolvedUserDataDir = path.isAbsolute(parsed.BROWSER_USER_DATA_DIR)
     ? parsed.BROWSER_USER_DATA_DIR
     : path.resolve(baseDir, parsed.BROWSER_USER_DATA_DIR);
 
+  const resolvedDatabasePath = path.isAbsolute(parsed.DATABASE_PATH)
+    ? parsed.DATABASE_PATH
+    : path.resolve(baseDir, parsed.DATABASE_PATH);
+
   return {
     ...parsed,
     RESOLVED_BROWSER_USER_DATA_DIR: resolvedUserDataDir,
+    RESOLVED_DATABASE_PATH: resolvedDatabasePath,
   };
 }

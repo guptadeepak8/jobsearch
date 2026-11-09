@@ -33,10 +33,12 @@ describe('BrowserManager', () => {
   });
 
   describe('URL Normalization', () => {
-    it('should prepend https:// when protocol is missing', () => {
+    it('should prepend https:// when protocol is missing (including host:port)', () => {
       const bm = new BrowserManager({ userDataDir: testUserDataDir, headless: true });
       expect(bm.normalizeUrl('example.com')).toBe('https://example.com/');
       expect(bm.normalizeUrl('example.com/jobs/123')).toBe('https://example.com/jobs/123');
+      expect(bm.normalizeUrl('localhost:3000')).toBe('https://localhost:3000/');
+      expect(bm.normalizeUrl('example.com:8080/jobs')).toBe('https://example.com:8080/jobs');
     });
 
     it('should preserve explicit http and https schemes', () => {
@@ -48,7 +50,9 @@ describe('BrowserManager', () => {
     it('should reject invalid or unsupported protocols', () => {
       const bm = new BrowserManager({ userDataDir: testUserDataDir, headless: true });
       expect(bm.normalizeUrl('javascript:alert(1)')).toBeNull();
+      expect(bm.normalizeUrl('mailto:hr@example.com')).toBeNull();
       expect(bm.normalizeUrl('ftp://files.example.com')).toBeNull();
+      expect(bm.normalizeUrl('file:///etc/passwd')).toBeNull();
       expect(bm.normalizeUrl('')).toBeNull();
       expect(bm.normalizeUrl('   ')).toBeNull();
     });
@@ -61,6 +65,7 @@ describe('BrowserManager', () => {
       expect(manager.isRunning()).toBe(false);
       expect(manager.getActivePage()).toBeNull();
       expect(manager.getContext()).toBeNull();
+      expect(manager.getCurrentUrl()).toBeNull();
     });
 
     it('should launch persistent browser context and transition through status events', async () => {
@@ -86,17 +91,44 @@ describe('BrowserManager', () => {
       expect(fs.existsSync(testUserDataDir)).toBe(true);
     });
 
-    it('should return existing context if launch is called multiple times (singleton)', async () => {
+    it('should return existing context if launch is called sequentially or concurrently (singleton)', async () => {
       manager = new BrowserManager({
         userDataDir: testUserDataDir,
         headless: true,
       });
 
-      const context1 = await manager.launch();
-      const context2 = await manager.launch();
+      const [context1, context2] = await Promise.all([manager.launch(), manager.launch()]);
+      const context3 = await manager.launch();
 
       expect(context1).toBe(context2);
+      expect(context1).toBe(context3);
       expect(manager.getStatus()).toBe('READY');
+    });
+
+    it('should handle active page closing by creating or switching to a valid page without duplicate events', async () => {
+      manager = new BrowserManager({
+        userDataDir: testUserDataDir,
+        headless: true,
+      });
+
+      await manager.launch();
+      const firstPage = manager.getActivePage()!;
+
+      let pageChangeCount = 0;
+      manager.on('activePageChanged', () => {
+        pageChangeCount++;
+      });
+
+      await firstPage.close();
+
+      // Wait briefly for fallback page creation
+      await new Promise((r) => setTimeout(r, 250));
+
+      const newActivePage = manager.getActivePage();
+      expect(newActivePage).not.toBeNull();
+      expect(newActivePage).not.toBe(firstPage);
+      expect(newActivePage?.isClosed()).toBe(false);
+      expect(pageChangeCount).toBe(1);
     });
 
     it('should gracefully close the browser and release resources', async () => {
@@ -151,7 +183,8 @@ describe('BrowserManager', () => {
       });
 
       // Use a self-contained data URL to test navigation without network dependency
-      const testHtml = '<html><head><title>Job Portal Test</title></head><body><h1>Careers</h1></body></html>';
+      const testHtml =
+        '<html><head><title>Job Portal Test</title></head><body><h1>Careers</h1></body></html>';
       const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(testHtml)}`;
 
       const result = await manager.navigateTo(dataUrl);

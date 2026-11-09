@@ -36,12 +36,17 @@ export class BrowserManager extends EventEmitter {
   private status: BrowserStatus = 'DISCONNECTED';
   private context: BrowserContext | null = null;
   private activePage: Page | null = null;
+  private launchPromise: Promise<BrowserContext> | null = null;
+  private trackedPages = new WeakSet<Page>();
+  private isShuttingDown = false;
+  private isCreatingFallbackPage = false;
+  private readonly shutdownHandler: () => void;
+
   private readonly options: Required<Omit<BrowserManagerOptions, 'viewport' | 'chromiumArgs' | 'display'>> & {
     viewport?: BrowserManagerOptions['viewport'];
     chromiumArgs?: string[];
     display?: string;
   };
-  private isShuttingDown = false;
 
   constructor(options: BrowserManagerOptions = {}) {
     super();
@@ -57,6 +62,38 @@ export class BrowserManager extends EventEmitter {
       chromiumArgs: options.chromiumArgs ?? [],
       display: options.display,
     };
+
+    this.shutdownHandler = () => {
+      void this.close();
+    };
+  }
+
+  public override on<K extends keyof BrowserManagerEvents>(
+    eventName: K,
+    listener: BrowserManagerEvents[K]
+  ): this {
+    return super.on(eventName, listener);
+  }
+
+  public override once<K extends keyof BrowserManagerEvents>(
+    eventName: K,
+    listener: BrowserManagerEvents[K]
+  ): this {
+    return super.once(eventName, listener);
+  }
+
+  public override off<K extends keyof BrowserManagerEvents>(
+    eventName: K,
+    listener: BrowserManagerEvents[K]
+  ): this {
+    return super.off(eventName, listener);
+  }
+
+  public override emit<K extends keyof BrowserManagerEvents>(
+    eventName: K,
+    ...args: Parameters<BrowserManagerEvents[K]>
+  ): boolean {
+    return super.emit(eventName, ...args);
   }
 
   /**
@@ -91,18 +128,35 @@ export class BrowserManager extends EventEmitter {
    * Returns current URL of active page.
    */
   public getCurrentUrl(): string | null {
-    return this.activePage ? this.activePage.url() : null;
+    if (!this.activePage || this.activePage.isClosed()) {
+      return null;
+    }
+    return this.activePage.url();
   }
 
   /**
    * Launches Playwright-managed Chromium with persistent profile context.
    * Preserves cookies, storage, and logins across sessions.
+   * Safe against concurrent calls (returns the in-flight launch promise).
    */
   public async launch(): Promise<BrowserContext> {
     if (this.context && this.isRunning()) {
       return this.context;
     }
 
+    if (this.launchPromise) {
+      return this.launchPromise;
+    }
+
+    this.launchPromise = this.performLaunch();
+    try {
+      return await this.launchPromise;
+    } finally {
+      this.launchPromise = null;
+    }
+  }
+
+  private async performLaunch(): Promise<BrowserContext> {
     this.setStatus('LAUNCHING');
 
     try {
@@ -114,7 +168,7 @@ export class BrowserManager extends EventEmitter {
       // Combine default memory-safe arguments with user-provided arguments
       const args = Array.from(new Set([...DEFAULT_CHROMIUM_ARGS, ...(this.options.chromiumArgs ?? [])]));
 
-      const env: Record<string, string> = { ...process.env as Record<string, string> };
+      const env: Record<string, string> = { ...(process.env as Record<string, string>) };
       if (this.options.display) {
         env.DISPLAY = this.options.display;
       }
@@ -128,6 +182,8 @@ export class BrowserManager extends EventEmitter {
         ignoreHTTPSErrors: false,
       });
 
+      this.registerSignalHandlers();
+
       // Context close listener
       this.context.on('close', () => {
         if (!this.isShuttingDown) {
@@ -139,6 +195,10 @@ export class BrowserManager extends EventEmitter {
       const existingPages = this.context.pages();
       if (existingPages.length > 0) {
         this.setActivePage(existingPages[0]);
+        // Close any leftover extra pages to conserve memory
+        for (let i = 1; i < existingPages.length; i++) {
+          await existingPages[i].close().catch(() => {});
+        }
       } else {
         const newPage = await this.context.newPage();
         this.setActivePage(newPage);
@@ -152,6 +212,9 @@ export class BrowserManager extends EventEmitter {
       this.setStatus('READY');
       return this.context;
     } catch (error) {
+      this.unregisterSignalHandlers();
+      this.context = null;
+      this.activePage = null;
       this.setStatus('CRASHED');
       const err = error instanceof Error ? error : new Error(String(error));
       this.emit('browserCrashed', err);
@@ -183,20 +246,22 @@ export class BrowserManager extends EventEmitter {
       return errorResult;
     }
 
+    const page = this.activePage;
     this.setStatus('NAVIGATING');
 
     const timeout = options.timeout ?? this.options.navigationTimeout;
     const waitUntil = options.waitUntil ?? 'domcontentloaded';
 
     try {
-      const response = await this.activePage.goto(normalizedUrl, {
+      const response = await page.goto(normalizedUrl, {
         waitUntil,
         timeout,
       });
 
-      const title = await this.activePage.title().catch(() => '');
+      const currentPage = this.activePage ?? page;
+      const title = !currentPage.isClosed() ? await currentPage.title().catch(() => '') : '';
       const httpStatus = response ? response.status() : undefined;
-      const finalUrl = this.activePage.url();
+      const finalUrl = !currentPage.isClosed() ? currentPage.url() : normalizedUrl;
 
       const result: NavigationResult = {
         success: true,
@@ -206,17 +271,25 @@ export class BrowserManager extends EventEmitter {
         durationMs: Date.now() - startTime,
       };
 
-      this.setStatus('READY');
+      if (this.status === 'NAVIGATING') {
+        this.setStatus('READY');
+      }
       this.emit('pageNavigated', result);
       return result;
     } catch (error) {
-      this.setStatus('READY');
+      if (this.status === 'NAVIGATING') {
+        this.setStatus('READY');
+      }
       const errorMessage = error instanceof Error ? error.message : String(error);
-      const title = await this.activePage.title().catch(() => '');
+      const currentPage = this.activePage;
+      const title =
+        currentPage && !currentPage.isClosed() ? await currentPage.title().catch(() => '') : '';
+      const currentUrl =
+        currentPage && !currentPage.isClosed() ? currentPage.url() || normalizedUrl : normalizedUrl;
 
       const result: NavigationResult = {
         success: false,
-        url: this.activePage.url() || normalizedUrl,
+        url: currentUrl,
         title,
         error: errorMessage,
         durationMs: Date.now() - startTime,
@@ -231,6 +304,8 @@ export class BrowserManager extends EventEmitter {
    * Gracefully shuts down the browser context and releases file locks.
    */
   public async close(): Promise<void> {
+    this.unregisterSignalHandlers();
+
     if (!this.context) {
       this.setStatus('DISCONNECTED');
       return;
@@ -239,7 +314,7 @@ export class BrowserManager extends EventEmitter {
     this.isShuttingDown = true;
     try {
       await this.context.close();
-    } catch (err) {
+    } catch {
       // Ignore errors if browser process has already died
     } finally {
       this.context = null;
@@ -254,18 +329,18 @@ export class BrowserManager extends EventEmitter {
   /**
    * Normalizes and validates incoming URL string.
    * Supports http, https, and data URLs.
-   * Auto-prepends 'https://' if scheme is omitted.
+   * Auto-prepends 'https://' if scheme is omitted (including host:port inputs).
    */
   public normalizeUrl(raw: string): string | null {
     if (!raw || typeof raw !== 'string') return null;
     const trimmed = raw.trim();
     if (!trimmed) return null;
 
-    // Check if it already has a scheme (e.g. "http:", "https:", "ftp:", "javascript:", "data:")
-    const schemeMatch = trimmed.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
-    if (schemeMatch) {
-      const scheme = schemeMatch[1].toLowerCase();
-      if (scheme !== 'http' && scheme !== 'https' && scheme !== 'data') {
+    // 1. Check for explicit hierarchical scheme (e.g. "http://", "https://", "ftp://")
+    const hierarchicalSchemeMatch = trimmed.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
+    if (hierarchicalSchemeMatch) {
+      const scheme = hierarchicalSchemeMatch[1].toLowerCase();
+      if (scheme !== 'http' && scheme !== 'https') {
         return null;
       }
       try {
@@ -276,7 +351,24 @@ export class BrowserManager extends EventEmitter {
       }
     }
 
-    // No scheme provided, prepend https://
+    // 2. Allow data: URLs for local/self-contained HTML rendering
+    if (/^data:/i.test(trimmed)) {
+      try {
+        const parsed = new URL(trimmed);
+        return parsed.toString();
+      } catch {
+        return null;
+      }
+    }
+
+    // 3. Reject non-hierarchical schemes (e.g. "javascript:", "mailto:", "file:", "about:")
+    // while allowing "host:port" patterns (e.g. "localhost:3000", "example.com:8080/jobs")
+    const isHostPort = /^[a-zA-Z0-9.-]+:\d+(\/|\?|#|$)/.test(trimmed);
+    if (!isHostPort && /^([a-zA-Z][a-zA-Z0-9+.-]*):/.test(trimmed)) {
+      return null;
+    }
+
+    // 4. No scheme provided, prepend https://
     try {
       const withHttps = `https://${trimmed}`;
       const parsed = new URL(withHttps);
@@ -297,45 +389,91 @@ export class BrowserManager extends EventEmitter {
     }
   }
 
-  private setActivePage(page: Page): void {
-    this.activePage = page;
-    this.activePage.setDefaultNavigationTimeout(this.options.navigationTimeout);
+  private registerPageListeners(page: Page): void {
+    if (this.trackedPages.has(page)) {
+      return;
+    }
+    this.trackedPages.add(page);
 
-    this.activePage.on('crash', () => {
-      this.setStatus('CRASHED');
-      this.emit('browserCrashed', new Error('Active browser page crashed'));
-    });
-
-    this.activePage.on('close', () => {
-      if (this.isShuttingDown || !this.context) return;
-      const remainingPages = this.context.pages().filter((p) => p !== this.activePage);
-      if (remainingPages.length > 0) {
-        this.setActivePage(remainingPages[0]);
-      } else {
-        // Active page closed, no others left; create fresh page to maintain session
-        this.context
-          .newPage()
-          .then((p) => this.setActivePage(p))
-          .catch(() => {
-            // Context might have closed simultaneously
-          });
+    page.on('crash', () => {
+      if (this.activePage === page) {
+        this.setStatus('CRASHED');
+        this.emit('browserCrashed', new Error('Active browser page crashed'));
       }
     });
 
+    page.on('close', () => {
+      if (this.isShuttingDown || !this.context) return;
+      if (this.activePage !== page) return;
+
+      const remainingPages = this.context
+        .pages()
+        .filter((p) => p !== page && !p.isClosed());
+
+      if (remainingPages.length > 0) {
+        this.setActivePage(remainingPages[remainingPages.length - 1]);
+      } else if (!this.isCreatingFallbackPage) {
+        // Active page closed and no others left; create a fresh page to keep session alive
+        this.isCreatingFallbackPage = true;
+        this.context
+          .newPage()
+          .then((p) => {
+            if (!this.isShuttingDown && this.context) {
+              this.setActivePage(p);
+            }
+          })
+          .catch(() => {
+            // Context might have closed simultaneously
+          })
+          .finally(() => {
+            this.isCreatingFallbackPage = false;
+          });
+      }
+    });
+  }
+
+  private setActivePage(page: Page): void {
+    this.registerPageListeners(page);
+    if (this.activePage === page) {
+      return;
+    }
+
+    this.activePage = page;
+    this.activePage.setDefaultNavigationTimeout(this.options.navigationTimeout);
     this.emit('activePageChanged', page);
   }
 
   private handleNewPage(newPage: Page): void {
-    // In a 4GB RAM environment, we prioritize the newly opened page (e.g. auth popup),
-    // and close old blank/unused pages if they were abandoned.
+    const previousPage = this.activePage;
     this.setActivePage(newPage);
+
+    // In a 4GB RAM environment, if the previous page was an unused blank tab, close it
+    if (
+      previousPage &&
+      previousPage !== newPage &&
+      !previousPage.isClosed() &&
+      previousPage.url() === 'about:blank'
+    ) {
+      void previousPage.close().catch(() => {});
+    }
   }
 
   private handleContextClosed(): void {
+    this.unregisterSignalHandlers();
     this.context = null;
     this.activePage = null;
     this.setStatus('CLOSED');
     this.emit('closed');
     this.setStatus('DISCONNECTED');
+  }
+
+  private registerSignalHandlers(): void {
+    process.once('SIGINT', this.shutdownHandler);
+    process.once('SIGTERM', this.shutdownHandler);
+  }
+
+  private unregisterSignalHandlers(): void {
+    process.off('SIGINT', this.shutdownHandler);
+    process.off('SIGTERM', this.shutdownHandler);
   }
 }
