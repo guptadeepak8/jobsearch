@@ -1,0 +1,21 @@
+{
+  "name": "jobsearch-automation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Locally operated, resource-efficient automated job application assistant",
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "build": "pnpm --filter ./packages/* run build",
+    "test": "pnpm --filter ./packages/* run test",
+    "dev:server": "pnpm --filter @jobsearch/server run dev",
+    "dev:dashboard": "pnpm --filter @jobsearch/dashboard run dev"
+  },
+  "keywords": [
+    "job-automation",
+    "playwright",
+    "fastify",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT"
+}
